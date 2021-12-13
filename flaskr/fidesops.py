@@ -100,7 +100,7 @@ def create_oauth_client(access_token):
     )
 
 
-def create_postgres_connection(key, access_token):
+def create_connection(key, access_token, connection_type="postgres"):
     """
     Create a connection in fidesops for our PostgreSQL database
 
@@ -112,11 +112,11 @@ def create_postgres_connection(key, access_token):
         {
             "name": key,
             "key": key,
-            "connection_type": "postgres",
+            "connection_type": connection_type,
             "access": "write",
         },
     ]
-    response = requests.put(
+    response = requests.patch(
         f"{FIDESOPS_URL}/api/v1/connection",
         headers=oauth_headers(access_token=access_token),
         json=connection_create_data,
@@ -132,6 +132,28 @@ def create_postgres_connection(key, access_token):
 
     raise RuntimeError(
         f"fidesops connection creation failed! response.status_code={response.status_code}, response.json()={response.json()}"
+    )
+
+
+def configure_snowflake_connection(key, snowflake_url):
+    connection_secrets_data = {
+        "url": snowflake_url,
+    }
+    response = requests.put(
+        f"{FIDESOPS_URL}/api/v1/connection/{key}/secret",
+        headers=oauth_headers(access_token=access_token),
+        json=connection_secrets_data,
+    )
+
+    if response.ok:
+        if (response.json())["test_status"] != "failed":
+            logger.info(
+                f"Configured fidesops connection secrets via /api/v1/connection/{key}/secret"
+            )
+            return response.json()
+
+    raise RuntimeError(
+        f"fidesops connection configuration failed! response.status_code={response.status_code}, response.json()={response.json()}"
     )
 
 
@@ -152,7 +174,7 @@ def configure_postgres_connection(
         "username": username,
         "password": password,
     }
-    response = requests.put(
+    response = requests.patch(
         f"{FIDESOPS_URL}/api/v1/connection/{key}/secret",
         headers=oauth_headers(access_token=access_token),
         json=connection_secrets_data,
@@ -225,7 +247,7 @@ def create_dataset(connection_key, yaml_path, access_token):
         dataset = yaml.safe_load(file).get("dataset", [])[0]
 
     dataset_create_data = [dataset]
-    response = requests.put(
+    response = requests.patch(
         f"{FIDESOPS_URL}/api/v1/connection/{connection_key}/dataset",
         headers=oauth_headers(access_token=access_token),
         json=dataset_create_data,
@@ -263,7 +285,7 @@ def create_local_storage(key, format, access_token):
             },
         },
     ]
-    response = requests.put(
+    response = requests.patch(
         f"{FIDESOPS_URL}/api/v1/storage/config",
         headers=oauth_headers(access_token=access_token),
         json=storage_create_data,
@@ -297,7 +319,7 @@ def create_policy(key, access_token):
             "key": key,
         },
     ]
-    response = requests.put(
+    response = requests.patch(
         f"{FIDESOPS_URL}/api/v1/policy",
         headers=oauth_headers(access_token=access_token),
         json=policy_create_data,
@@ -344,10 +366,14 @@ def create_policy_rule(
             "name": key,
             "key": key,
             "action_type": action_type,
-            "storage_destination_key": storage_destination_key,
+            # "storage_destination_key": storage_destination_key,
+            "masking_strategy": {
+                "strategy": "null_rewrite",
+                "configuration": {},
+            },
         },
     ]
-    response = requests.put(
+    response = requests.patch(
         f"{FIDESOPS_URL}/api/v1/policy/{policy_key}/rule",
         headers=oauth_headers(access_token=access_token),
         json=rule_create_data,
@@ -380,7 +406,7 @@ def create_policy_rule_target(policy_key, rule_key, data_category, access_token)
             "data_category": data_category,
         },
     ]
-    response = requests.put(
+    response = requests.patch(
         f"{FIDESOPS_URL}/api/v1/policy/{policy_key}/rule/{rule_key}/target",
         headers=oauth_headers(access_token=access_token),
         json=target_create_data,
@@ -510,15 +536,12 @@ if __name__ == "__main__":
         print("Press [enter] to continue...")
         input()
 
-    create_postgres_connection(key="flaskr_postgres", access_token=access_token)
-    configure_postgres_connection(
-        key="flaskr_postgres",
-        host=POSTGRES_SERVER,
-        port=POSTGRES_PORT,
-        dbname="flaskr",
-        username=POSTGRES_USER,
-        password=POSTGRES_PASSWORD,
-        access_token=access_token,
+    create_connection(
+        key="snowflake", access_token=access_token, connection_type="snowflake"
+    )
+    configure_snowflake_connection(
+        key="snowflake",
+        snowflake_url="snowflake://ETHYCA:3thycaDB@zoa73785/FIDESOPS_TEST/TEST",
     )
 
     # Configure a storage config to upload the results
@@ -539,27 +562,19 @@ if __name__ == "__main__":
             input()
 
         validate_dataset(
-            connection_key="flaskr_postgres",
-            yaml_path="fides_resources/flaskr_postgres_dataset.yml",
+            connection_key="snowflake",
+            yaml_path="fides_resources/snowflake_example_dataset.yml",
             access_token=access_token,
         )
         datasets = create_dataset(
-            connection_key="flaskr_postgres",
-            yaml_path="fides_resources/flaskr_postgres_dataset.yml",
+            connection_key="snowflake",
+            yaml_path="fides_resources/snowflake_example_dataset.yml",
             access_token=access_token,
         )
 
         # Create a policy that returns all user data
-        print(
-            "\n\nEnter a list of target data categories for request policy "
-            "[user]"
-        )
-        data_categories = [
-            e.strip()
-            for e in str(
-                input() or "user"
-            ).split(",")
-        ]
+        print("\n\nEnter a list of target data categories for request policy " "[user]")
+        data_categories = [e.strip() for e in str(input() or "user").split(",")]
         create_policy(
             key="example_request_policy",
             access_token=access_token,
@@ -573,7 +588,8 @@ if __name__ == "__main__":
         create_policy_rule(
             policy_key="example_request_policy",
             key="access_user_data",
-            action_type="access",
+            # action_type="access",
+            action_type="erasure",
             storage_destination_key="example_storage",
             access_token=access_token,
         )
@@ -596,7 +612,8 @@ if __name__ == "__main__":
             access_token=access_token,
         )
         privacy_request_id = privacy_requests["succeeded"][0]["id"]
-        print_results(privacy_request_id=privacy_request_id)
+        # print_results(privacy_request_id=privacy_request_id)
+        print(privacy_requests)
 
         print("Complete! Press [y] to execute another request (or any key to quit)")
         should_continue = input() == "y"
